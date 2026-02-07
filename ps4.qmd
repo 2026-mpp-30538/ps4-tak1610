@@ -1,0 +1,483 @@
+---
+title: "Problem Set 4"
+author: "Takuma Kazama"
+date: "02/07/2026"
+format: 
+  pdf:
+    include-in-header: 
+       text: |
+         \usepackage{fvextra}
+         \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,commandchars=\\\{\}}
+include-before-body:
+  text: |
+    \RecustomVerbatimEnvironment{verbatim}{Verbatim}{
+      showspaces = false,
+      showtabs = false,
+      breaksymbolleft={},
+      breaklines
+    }
+output:
+  echo: false
+  eval: false
+---
+
+**Due 02/07 at 5:00PM Central.**
+
+"This submission is my work alone and complies with the 30538 integrity policy." Add your initials to indicate your agreement: **TK**
+
+### Github Classroom Assignment Setup and Submission Instructions
+
+1.  **Accepting and Setting up the PS4 Assignment Repository**
+    -   Each student must individually accept the repository for the problem set from Github Classroom ("ps4") -- <https://classroom.github.com/a/hWhtcHqH>
+        -   You will be prompted to select your cnetid from the list in order to link your Github account to your cnetid.
+        -   If you can't find your cnetid in the link above, click "continue to next step" and accept the assignment, then add your name, cnetid, and Github account to this Google Sheet and we will manually link it: <https://rb.gy/9u7fb6>
+    -   If you authenticated and linked your Github account to your device, you should be able to clone your PS4 assignment repository locally.
+    -   Contents of PS4 assignment repository:
+        -   `ps4_template.qmd`: this is the Quarto file with the template for the problem set. You will write your answers to the problem set here.
+2.  **Submission Process**:
+    -   Knit your completed solution `ps4.qmd` as a pdf `ps4.pdf`.
+        -   Your submission does not need runnable code. Instead, you will tell us either what code you ran or what output you got.
+    -   To submit, push `ps4.qmd` and `ps4.pdf` to your PS4 assignment repository. Confirm on Github.com that your work was successfully pushed.
+
+### Grading
+- You will be graded on what was last pushed to your PS4 assignment repository before the assignment deadline
+- Problem sets will be graded for completion as: {missing (0%); ✓- (incomplete, 50%); ✓+ (excellent, 100%)}
+    - The percent values assigned to each problem denote how long we estimate the problem will take as a share of total time spent on the problem set, not the points they are associated with.
+- In order for your submission to be considered complete, you need to push both your `ps4.qmd` and `ps4.pdf` to your repository. Submissions that do not include both files will automatically receive 50% credit.
+
+
+\newpage
+
+```{python}
+#| echo: false
+import pandas as pd
+import altair as alt
+import time
+
+import warnings 
+warnings.filterwarnings('ignore')
+alt.renderers.enable("png")
+```
+
+
+## Step 1: Develop initial scraper and crawler
+\
+The head of the dataframe is below.
+
+```{python}
+#| echo: false
+import requests
+from bs4 import BeautifulSoup
+
+# Set up
+url = "https://oig.hhs.gov/fraud/enforcement/"
+headers = {
+    "User-Agent": "DAP30538CourseBot/1.0 (takazama@uchicago.edu)"
+}
+response = requests.get(url)
+soup = BeautifulSoup(response.text, "lxml")
+
+# get an overveiw of the structure
+soup
+
+# Extract blocks that contain all of the target itmes
+blocks = soup.find_all("li", class_="usa-card") # With visual inspection, the tag <li> contains items of interest very well.
+# Sanity check
+"Actions found:", len(blocks) # The result matches the manual count done in the first page.
+
+# Make a dateframe
+rows = []
+
+for block in blocks:
+    # Title and Link
+    h2 = block.find("h2") # This contains "action's names" and the url
+    a_tag = h2.find("a") # Simplify h2
+    title = a_tag.text 
+    link = a_tag.get('href')
+    full_link = "https://oig.hhs.gov" + link
+
+    # Date and Catrgory
+    meta = block.find("div", class_="font-body-sm") # Extract the block containing date and category info.
+    # Date (span)
+    span = meta.find("span")
+    date = span.text
+    # Categories (ALL li tags)
+    categories = [] # Some of the actions have more than one categories, so we need to make a list for this.
+    ul = meta.find("ul")
+    categories = [li.text for li in ul.find_all("li", class_="display-inline-block")]
+
+    rows.append({
+        "title": title,
+        "date": date,
+        "categories": categories,   # list
+        "link": full_link
+    })
+
+df = pd.DataFrame(rows)
+print(df.head())
+
+```
+
+## Step 2: Making the scraper dynamic
+
+### 1. Turning the scraper into a function 
+
+* a. Pseudo-Code  
+\  
+
+The pseudo code is as follows:
+\  
+
+FUNCTION dynamic_scraper(start_year, start_month):
+
+    IF start_year < 2013:
+        PRINT warning message
+        RETURN empty table with columns
+
+    SET start_date = first day of (start_year, start_month)
+
+    INITIALIZE empty list rows
+    SET page = 1
+
+    LOOP forever:
+        BUILD page_url using base url and page number
+        REQUEST page_url
+        PARSE HTML response
+
+        FIND all action blocks on the page
+
+        FOR each action block:
+            EXTRACT title
+            EXTRACT relative link
+            BUILD full link (base domain + relative link)
+
+            EXTRACT date text
+            PARSE date text into date object d
+
+            IF d is earlier than start_date:
+                RETURN table made from rows
+                (stop everything immediately)
+
+            EXTRACT all category labels
+
+            ADD {title, date, categories, full link} to rows
+
+        WAIT 1 second (polite scraping)
+
+        CHECK if a "Next" pagination link exists
+        IF no "Next" link exists:
+            BREAK out of loop
+
+        INCREMENT page number
+
+    RETURN table made from rows
+ENDFUNCTION
+
+* b. Create Dynamic Scraper
+
+```{python}
+#| echo: false
+import time
+from datetime import datetime
+
+# Set the indicator for scraping
+run_scraper = False
+
+
+def dynamic_scraper(start_year, start_month):
+    # Stop running the code if year is < 2013
+    if start_year < 2013:
+         print("Please use year >= 2013 (only actions after 2013 are listed).")
+         return pd.DataFrame(columns=["title", "date", "categories", "link"])
+    # Set the start date of the target period (used to stop the for loop)
+    start_date = datetime(start_year, start_month, 1).date()
+   
+    rows = []
+    page = 1
+
+    while True:
+        link = f"{url}?page={page}"
+
+        r = requests.get(link, headers=headers)
+        r.raise_for_status() # This line checks whether the request succeeded.
+        soup = BeautifulSoup(r.text, "lxml")
+
+        # blocks for this page (each action)
+        blocks = soup.find_all("li", class_="usa-card")
+
+        for block in blocks:
+            # Title and Link
+            h2 = block.find("h2") # This contains "action's names" and the url
+            a_tag = h2.find("a") # Simplify h2
+            title = a_tag.text 
+            link = a_tag.get('href')
+            full_link = "https://oig.hhs.gov" + link
+
+            # Date and Catrgory
+            meta = block.find("div", class_="font-body-sm") # Extract the block containing date and category info.
+            # Date (span)
+            span = meta.find("span")
+            date = span.text
+            # Parse date + filter by start_date
+            d = datetime.strptime(date, "%B %d, %Y").date()
+            if d < start_date:
+                # Since page is sorted by date (newest first),
+                # once we hit older than start_date, we automatically stop running the code.
+                return pd.DataFrame(rows)
+
+            # Categories (ALL li tags)
+            categories = [] # Some of the actions have more than one categories, so we need to make a list for this.
+            ul = meta.find("ul")
+            categories = [li.text for li in ul.find_all("li", class_="display-inline-block")]
+
+            rows.append({
+                "title": title,
+                "date": date,
+                "categories": categories,
+                "link": full_link
+            })
+            
+        # add 1 second wait before going to the next page
+        time.sleep(1)
+
+        # decide whether to keep going
+        # If there is no "Next" link, we’re done.
+        next_link = soup.find("a", class_="pagination-next") 
+        if not next_link:
+            break
+
+        page += 1
+
+    return pd.DataFrame(rows)
+
+# Use the function
+if run_scraper:
+    df_2 = dynamic_scraper(2024, 1)
+    df_2.to_csv("enforcement_actions_2024_01.csv", index=False)
+else:
+    df_2 = pd.read_csv(r"C:\Users\gnolu\enforcement_actions_2024_01.csv")
+
+# Show the number of rows (actions scraped)
+print(len(df_2))
+
+# Show the earliest data (the bottom row)
+bottom_row = df_2.tail(1).iloc[0]
+for col in df_2.columns:
+    print(f"{col}: {bottom_row[col]}")
+
+```
+
+The numver of the actions scraped is 1772, and the details of the eraliest entry is seen above.
+
+* c. Test Your Code
+
+```{python}
+#| echo: false
+# Use the function
+if run_scraper:
+    df_3 = dynamic_scraper(2022, 1)
+    df_3.to_csv("enforcement_actions_2022_01.csv", index=False)
+else:
+    df_3 = pd.read_csv(r"C:\Users\gnolu\enforcement_actions_2022_01.csv")
+
+# Show the number of rows (actions scraped)
+print(len(df_3))
+
+# Show the earliest data (the bottom row)
+bottom_row_2 = df_3.tail(1).iloc[0]
+for col in df_3.columns:
+    print(f"{col}: {bottom_row_2[col]}")
+```
+
+The numver of the actions scraped is 3377, and the details of the eraliest entry is seen above.
+
+## Step 3: Plot data based on scraped data
+
+### 1. Plot the number of enforcement actions over time
+
+```{python}
+#| echo: false
+# Convert the data srings in date column into Python/pandas time-series data 
+df_3["date"] = pd.to_datetime(df_3["date"])
+# Plot the data
+actions = (
+    alt.Chart(df_3)
+    .mark_line()
+    .encode(
+        x=alt.X("yearmonth(date):T", 
+                title="Year-Month", 
+                axis=alt.Axis(
+                          format="%Y %b", 
+                          labelAngle=-45,  
+                          labelOverlap=False,
+                          tickCount={"interval": "month", "step": 6})
+                ),
+        y=alt.Y("count():Q", title="Number of Actions")
+    )
+).properties(
+    title="The number of enforcement actions over time", 
+    width=400,
+    height=200)
+
+actions
+```
+
+The plot is as above. In most of the months, the number lies within the range between 40 and 80.
+
+### 2. Plot the number of enforcement actions categorized:
+
+* based on "Criminal and Civil Actions" vs. "State Enforcement Agencies"
+
+```{python}
+#| echo: false
+import numpy as np
+# ---Add dummy variables that tell whether each row has items of interest in "categories" column----
+df_cca_sea = df_3.copy()
+df_cca_sea["cca"] = df_cca_sea["categories"].apply(
+    lambda cats: int("Criminal and Civil Actions" in cats)
+)
+df_cca_sea["sea"] = df_cca_sea["categories"].apply(
+    lambda cats: int("State Enforcement Agencies" in cats)
+)
+
+# ---Check the the number of rows for each---
+(df_cca_sea["cca"] == 1).sum()
+(df_cca_sea["sea"] == 1).sum()
+# Check the number of rows that have both cca and sea as category
+# The reult is 3, which is less than 0.5% of each's observations, so we will ignore this overlap.
+both = df_cca_sea[(df_cca_sea["cca"] == 1) & (df_cca_sea["sea"] == 1)]
+len(both)
+
+# ---Plot the date---
+# Subset the data to only cca and sea
+df_plot = df_cca_sea[(df_cca_sea["cca"] == 1) | (df_cca_sea["sea"] == 1)]
+
+df_plot["type"] = np.where(
+    df_plot["cca"] == 1,
+    "Criminal and Civil Actions",
+    "State Enforcement Agencies"
+)
+
+cca_sea = (
+    alt.Chart(df_plot)
+    .mark_line()
+    .encode(
+        x=alt.X(
+            "yearmonth(date):T",
+            title="Year–Month",
+            axis=alt.Axis(
+                format="%Y %b",
+                labelAngle=-45,
+                labelOverlap=False,
+                tickCount={"interval": "month", "step": 6}
+            )
+        ),
+        y=alt.Y("count():Q", title="Number of Actions"),
+        color=alt.Color(
+            "type:N",
+            title="Action Type",
+            scale=alt.Scale(
+                domain=[
+                    "Criminal and Civil Actions",
+                    "State Enforcement Agencies"
+                ],
+                range=["#1f77b4", "#d62728"]  # blue & red
+            )
+        )
+    )
+    .properties(
+        title="Criminal and Civil Actions vs. State Enforcement Agencies",
+        width=400,
+        height=200
+    )
+)
+
+cca_sea
+
+```
+
+The plot is above. It is noticeable that the number of State Enfrocement Agencies is substantially lower that that of Criminal and Civil Actions almost all the time druing the period.
+\  
+
+* based on five topics
+
+```{python}
+#| echo: false
+# ----Restrict the dataset to only cca---
+df_cca = df_cca_sea[(df_cca_sea["cca"] == 1)]
+
+# ---Make rules for assinging categories----
+# I had ChatGPT scam the data file and analyze the pattern. Based on its suggestion, the rules are as follows:
+# ・ For each category, associated words are selected.
+# ・ Some titles can match multiple categoris, so we need to prioritize the order. And the order of prioirty as follows.
+# ・ 1. Health Care Fraud: Medicare / Medicaid dominates the dataset
+# ・ 2. Drug Enforcement: Some cases involve drugs outside healthcare
+# ・ 3. Financial Fraud: Financial fraud often appears inside healthcare cases
+# ・ 4. Bribery / Corruption: Fewer cases
+# ・ 5. Other
+def assign_topic(title):
+    t = title.lower()
+
+    if any(k in t for k in [
+        "medicare", "medicaid", "health care", "hospital", "clinic",
+        "physician", "doctor", "nurse", "hospice", "pharmacy",
+        "medical", "false claims", "billing", "kickback"
+    ]):
+        return "Health Care Fraud"
+
+    elif any(k in t for k in [
+        "drug", "opioid", "controlled substance", "prescription",
+        "fentanyl"
+    ]):
+        return "Drug Enforcement"
+
+    elif any(k in t for k in [
+        "bank", "banker", "wire fraud", "financial",
+        "launder", "money laundering", "embezzle"
+    ]):
+        return "Financial Fraud"
+
+    elif any(k in t for k in [
+        "bribe", "bribery", "corruption", "public official",
+        "extortion"
+    ]):
+        return "Bribery/Corruption"
+
+    else:
+        return "Other"
+
+# ---Apply the function to the dataset---
+df_cca["topic"] = df_cca["title"].apply(assign_topic)
+
+# ---Plot the dataset---
+five = (
+    alt.Chart(df_cca)
+    .mark_line()
+    .encode(
+        x=alt.X(
+            "yearmonth(date):T",
+            title="Year–Month",
+            axis=alt.Axis(
+                format="%Y %b",
+                labelAngle=-45,
+                labelOverlap=False,
+                tickCount={"interval": "month", "step": 6}
+            )
+        ),
+        y=alt.Y("count():Q", title="Number of Actions"),
+        color=alt.Color(
+            "topic:N",
+            title="Category"
+        )
+    )
+    .properties(
+        title="Five Categories in Criminal and Civil Actions",
+        width=400,
+        height=200
+    )
+)
+
+five
+```
+
+The plot is seen above. It is clear that mose of the cases in Criminal and Civil Actions are associated with Health Care Fraud.
